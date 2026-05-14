@@ -1,0 +1,146 @@
+- name: Выполнить 3 раздел
+  hosts: docker_hosts
+  become: true
+  gather_facts: true
+  vars:
+    project_root: "{{ playbook_dir | dirname }}"
+    remote_project_dir: /tmp/yadro-intern-section-3
+    docker_image_name: yadro-section-3
+    docker_container_name: yadro-section-3-container
+    docker_user: "{{ target_user | default(ansible_user | default(lookup('env', 'USER'))) }}"
+  tasks:
+    - name: Определить целевую систему
+      ansible.builtin.debug:
+        msg: "{{ inventory_hostname }}: {{ ansible_distribution }} {{ ansible_distribution_version }} {{ ansible_architecture }}"
+
+    - name: Проверить поддержку системы
+      ansible.builtin.assert:
+        that:
+          - ansible_os_family == "Debian"
+        fail_msg: "Playbook поддерживает Debian и Ubuntu"
+
+    - name: Установить Docker и зависимости
+      ansible.builtin.apt:
+        name:
+          - ca-certificates
+          - curl
+          - python3
+          - docker.io
+        state: present
+        update_cache: true
+
+    - name: Добавить пользователя в группу docker
+      ansible.builtin.user:
+        name: "{{ docker_user }}"
+        groups: docker
+        append: true
+      when: docker_user | length > 0
+
+    - name: Запустить службу Docker
+      ansible.builtin.systemd:
+        name: docker
+        state: started
+        enabled: true
+
+    - name: Проверить версию Docker
+      ansible.builtin.command:
+        argv:
+          - docker
+          - --version
+      register: docker_version
+      changed_when: false
+
+    - name: Вывести версию Docker
+      ansible.builtin.debug:
+        var: docker_version.stdout
+
+    - name: Создать каталог проекта на целевом хосте
+      ansible.builtin.file:
+        path: "{{ remote_project_dir }}/{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - 1_раздел
+        - 2_раздел
+
+    - name: Скопировать скрипт
+      ansible.builtin.copy:
+        src: "{{ project_root }}/1_раздел/script.py"
+        dest: "{{ remote_project_dir }}/1_раздел/script.py"
+        mode: "0644"
+
+    - name: Скопировать Dockerfile
+      ansible.builtin.copy:
+        src: "{{ project_root }}/2_раздел/Dockerfile"
+        dest: "{{ remote_project_dir }}/2_раздел/Dockerfile"
+        mode: "0644"
+
+    - name: Собрать Docker-образ
+      ansible.builtin.command:
+        argv:
+          - docker
+          - build
+          - -f
+          - "{{ remote_project_dir }}/2_раздел/Dockerfile"
+          - -t
+          - "{{ docker_image_name }}"
+          - "{{ remote_project_dir }}"
+      register: docker_build
+      changed_when: true
+
+    - name: Удалить старый контейнер
+      ansible.builtin.command:
+        argv:
+          - docker
+          - rm
+          - -f
+          - "{{ docker_container_name }}"
+      register: remove_container
+      failed_when: remove_container.rc not in [0, 1]
+      changed_when: remove_container.rc == 0
+
+    - name: Запустить контейнер
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --name
+          - "{{ docker_container_name }}"
+          - -d
+          - "{{ docker_image_name }}"
+      register: docker_run
+      changed_when: true
+
+    - name: Дождаться завершения контейнера
+      ansible.builtin.command:
+        argv:
+          - docker
+          - wait
+          - "{{ docker_container_name }}"
+      register: docker_wait
+      changed_when: false
+
+    - name: Получить docker logs
+      ansible.builtin.command:
+        argv:
+          - docker
+          - logs
+          - "{{ docker_container_name }}"
+      register: docker_logs
+      changed_when: false
+
+    - name: Проверить код завершения контейнера
+      ansible.builtin.assert:
+        that:
+          - docker_wait.stdout | trim == "0"
+        fail_msg: "Контейнер завершился с кодом {{ docker_wait.stdout | trim }}"
+
+    - name: Проверить вывод скрипта
+      ansible.builtin.assert:
+        that:
+          - "'Requesting status' in docker_logs.stdout or 'Requesting status' in docker_logs.stderr"
+        fail_msg: "В docker logs не найден вывод скрипта"
+
+    - name: Вывести docker logs
+      ansible.builtin.debug:
+        msg: "{{ docker_logs.stdout_lines + docker_logs.stderr_lines }}"
